@@ -18,6 +18,7 @@ package com.cloudera.oryx.app.serving.als.model;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,7 +29,6 @@ import java.util.stream.Stream;
 
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.koloboke.collect.ObjCursor;
 import com.koloboke.collect.map.ObjIntMap;
 import com.koloboke.collect.map.ObjObjMap;
 import com.koloboke.collect.map.hash.HashObjIntMaps;
@@ -68,7 +68,7 @@ public final class ALSServingModel implements ServingModel {
   /** Item-feature matrix. This is partitioned into several maps for parallel access. */
   private final PartitionedFeatureVectors Y;
   /** Remembers items that each user has interacted with*/
-  private final ObjObjMap<String,ObjSet<String>> knownItems; // Right now no corresponding "knownUsers" object
+  private final ObjObjMap<String,Set<String>> knownItems; // Right now no corresponding "knownUsers" object
   private final AutoReadWriteLock knownItemsLock;
   private final ObjSet<String> expectedUserIDs;
   private final AutoReadWriteLock expectedUserIDsLock;
@@ -161,7 +161,7 @@ public final class ALSServingModel implements ServingModel {
    * @return set of known items for the user (immutable, but thread-safe)
    */
   public Set<String> getKnownItems(String user) {
-    ObjSet<String> knownItems = doGetKnownItems(user);
+    Set<String> knownItems = doGetKnownItems(user);
     if (knownItems == null) {
       return Collections.emptySet();
     }
@@ -170,11 +170,11 @@ public final class ALSServingModel implements ServingModel {
         return Collections.emptySet();
       }
       // Must copy since the original object is synchronized
-      return HashObjSets.newImmutableSet(knownItems);
+      return new HashSet<>(knownItems);
     }
   }
 
-  private ObjSet<String> doGetKnownItems(String user) {
+  private Set<String> doGetKnownItems(String user) {
     try (AutoLock al = knownItemsLock.autoReadLock()) {
       return knownItems.get(user);
     }
@@ -214,14 +214,14 @@ public final class ALSServingModel implements ServingModel {
 
   void addKnownItems(String user, Collection<String> items) {
     if (!items.isEmpty()) {
-      ObjSet<String> knownItemsForUser = doGetKnownItems(user);
+      Set<String> knownItemsForUser = doGetKnownItems(user);
 
       if (knownItemsForUser == null) {
         try (AutoLock al = knownItemsLock.autoWriteLock()) {
           // Check again
           knownItemsForUser = knownItems.get(user);
           if (knownItemsForUser == null) {
-            knownItemsForUser = HashObjSets.newMutableSet();
+            knownItemsForUser = new HashSet<>();
             knownItems.put(user, knownItemsForUser);
           }
         }
@@ -363,19 +363,7 @@ public final class ALSServingModel implements ServingModel {
     try (AutoLock al = knownItemsLock.autoReadLock()) {
       knownItems.values().forEach(knownItemsForUser -> {
         synchronized (knownItemsForUser) {
-          // knownItemsForUser.removeIf(notKeptOrRecent);
-          // TODO remove this temporary hack workaround and restore above
-          // see https://github.com/OryxProject/oryx/issues/304
-          ObjCursor<?> cursor = knownItemsForUser.cursor();
-          while (cursor.moveNext()) {
-            Object o = cursor.elem();
-            if (!(o instanceof String)) {
-              log.warn("Found non-String collection: {}", o);
-              cursor.remove();
-            } else if (notKeptOrRecent.test((String) o)) {
-              cursor.remove();
-            }
-          }
+          knownItemsForUser.removeIf(notKeptOrRecent);
         }
       });
     }
